@@ -1,0 +1,194 @@
+---
+# Reproduce (and verify) all three TLS CVE labs with Ansible.
+#
+#   ansible-playbook site.yml                 # all three
+#   ansible-playbook site.yml --tags nginx    # one lab
+#   ansible-playbook site.yml --tags cratedb
+#   ansible-playbook site.yml --tags traefik
+#   ansible-playbook site.yml --tags teardown # stop everything
+#
+# Run from a Linux / macOS / WSL2 control node (Ansible has no native Windows
+# control node). Needs on PATH: docker, openssl, bash, perl (nginx lab),
+# java/keytool (cratedb lab), k3d + kubectl (traefik lab). No extra Ansible
+# collections required.
+- name: Reproduce three TLS CVEs (vulnerable vs patched)
+  hosts: localhost
+  connection: local
+  gather_facts: false
+
+  vars:
+    repo_root: "{{ playbook_dir }}/.."
+    nginx_dir: "{{ playbook_dir }}/../cve-2025-23419-nginx"
+    cratedb_dir: "{{ playbook_dir }}/../cve-2024-37309-cratedb"
+    traefik_dir: "{{ playbook_dir }}/../cve-2025-66491-traefik"
+    gencerts: "{{ playbook_dir }}/../common/gen-certs.sh"
+    keytool: "{{ keytool_bin | default('keytool') }}"
+
+  tasks:
+    # =========================================================================
+    # Teardown (only runs with --tags teardown)
+    # =========================================================================
+    - name: Teardown everything
+      when: false
+      tags: [teardown, never]
+      block:
+        - ansible.builtin.command:
+            cmd: docker compose down
+            chdir: "{{ nginx_dir }}"
+          changed_when: true
+        - ansible.builtin.command:
+            cmd: docker compose down
+            chdir: "{{ cratedb_dir }}"
+          changed_when: true
+        - ansible.builtin.command: k3d cluster delete tls-poc
+          changed_when: true
+          failed_when: false
+    - name: Stop after teardown
+      ansible.builtin.meta: end_play
+      tags: [teardown, never]
+
+    # =========================================================================
+    # CVE-2025-23419  -  nginx  (client-cert bypass via session resumption)
+    # =========================================================================
+    - name: nginx lab
+      tags: [nginx]
+      block:
+        - name: nginx | generate certs
+          ansible.builtin.command: "bash {{ gencerts }} {{ nginx_dir }}/certs"
+          changed_when: true
+
+        - name: nginx | start vulnerable (1.27.3) + patched (1.27.4)
+          ansible.builtin.command:
+            cmd: docker compose up -d
+            chdir: "{{ nginx_dir }}"
+          changed_when: true
+
+        - name: nginx | give nginx a moment
+          ansible.builtin.pause: { seconds: 4 }
+
+        - name: nginx | attack the vulnerable build (8443)
+          ansible.builtin.command:
+            cmd: bash run.sh 8443
+            chdir: "{{ nginx_dir }}"
+          register: ngx_vuln
+          changed_when: false
+
+        - name: nginx | attack the patched build (9443)
+          ansible.builtin.command:
+            cmd: bash run.sh 9443
+            chdir: "{{ nginx_dir }}"
+          register: ngx_patched
+          changed_when: false
+
+        - name: nginx | assert bypass works on vuln, fails on patched
+          ansible.builtin.assert:
+            that:
+              - "'BYPASS SUCCESSFUL' in ngx_vuln.stdout"
+              - "'BYPASS SUCCESSFUL' not in ngx_patched.stdout"
+            success_msg: "nginx CVE-2025-23419: 1.27.3 bypass reproduced, 1.27.4 rejects it."
+            fail_msg: "nginx check failed - see registered output."
+
+    # =========================================================================
+    # CVE-2024-37309  -  CrateDB  (CPU DoS via TLS renegotiation)
+    # =========================================================================
+    - name: cratedb lab
+      tags: [cratedb]
+      block:
+        - name: cratedb | generate certs
+          ansible.builtin.command: "bash {{ gencerts }} {{ cratedb_dir }}/certs"
+          changed_when: true
+
+        - name: cratedb | drop any old keystore
+          ansible.builtin.file:
+            path: "{{ cratedb_dir }}/certs/keystore.jks"
+            state: absent
+
+        - name: cratedb | build PKCS12 bundle
+          ansible.builtin.command:
+            cmd: >-
+              openssl pkcs12 -export -in certs/server.crt -inkey certs/server.key
+              -certfile certs/ca.crt -name cratedb -out certs/keystore.p12
+              -passout pass:changeit
+            chdir: "{{ cratedb_dir }}"
+          changed_when: true
+
+        - name: cratedb | import into a Java keystore
+          ansible.builtin.command:
+            cmd: >-
+              {{ keytool }} -importkeystore
+              -srckeystore certs/keystore.p12 -srcstoretype PKCS12 -srcstorepass changeit
+              -destkeystore certs/keystore.jks -deststoretype JKS -deststorepass changeit
+              -destkeypass changeit -noprompt
+            chdir: "{{ cratedb_dir }}"
+          changed_when: true
+
+        - name: cratedb | start vulnerable (5.7.1) + patched (5.7.2)
+          ansible.builtin.command:
+            cmd: docker compose up -d
+            chdir: "{{ cratedb_dir }}"
+          changed_when: true
+
+        - name: cratedb | wait until both nodes report "started"
+          ansible.builtin.shell: |
+            for i in $(seq 1 40); do
+              v=$(docker logs cve-37309-vuln 2>&1 | grep -c '] started' || true)
+              p=$(docker logs cve-37309-patched 2>&1 | grep -c '] started' || true)
+              if [ "$v" -gt 0 ] && [ "$p" -gt 0 ]; then exit 0; fi
+              sleep 3
+            done
+            echo "timed out waiting for CrateDB"; exit 1
+          args: { executable: /bin/bash }
+          changed_when: false
+
+        - name: cratedb | attack the vulnerable build (4200)
+          ansible.builtin.command:
+            cmd: bash run.sh cve-37309-vuln 4200
+            chdir: "{{ cratedb_dir }}"
+          register: crate_vuln
+          changed_when: false
+
+        - name: cratedb | attack the patched build (4201)
+          ansible.builtin.command:
+            cmd: bash run.sh cve-37309-patched 4201
+            chdir: "{{ cratedb_dir }}"
+          register: crate_patched
+          changed_when: false
+
+        - name: cratedb | assert DoS on vuln, flat on patched
+          ansible.builtin.assert:
+            that:
+              - "'reproduced' in crate_vuln.stdout"
+              - "'fix in effect' in crate_patched.stdout"
+            success_msg: "CrateDB CVE-2024-37309: 5.7.1 honors renegotiation (DoS), 5.7.2 refuses it."
+            fail_msg: "cratedb check failed - see registered output."
+
+    # =========================================================================
+    # CVE-2025-66491  -  Traefik  (backend cert verification bypass)
+    # =========================================================================
+    - name: traefik lab
+      tags: [traefik]
+      block:
+        - name: traefik | generate certs
+          ansible.builtin.command: "bash {{ gencerts }} {{ traefik_dir }}/certs"
+          changed_when: true
+
+        - name: traefik | build k3d cluster, deploy both builds, probe both
+          ansible.builtin.command:
+            cmd: bash run.sh
+            chdir: "{{ traefik_dir }}"
+          register: traefik_out
+          changed_when: true
+
+        - name: traefik | assert 200 on vuln, 500 on patched
+          ansible.builtin.assert:
+            that:
+              - "'HTTP status: 200' in traefik_out.stdout"
+              - "'HTTP status: 500' in traefik_out.stdout"
+            success_msg: "Traefik CVE-2025-66491: 3.6.2 proxies to the rogue backend (200), 3.6.4 refuses (500)."
+            fail_msg: "traefik check failed - see registered output."
+
+    # =========================================================================
+    - name: Summary
+      tags: [always]
+      ansible.builtin.debug:
+        msg: "Done. Re-run a single lab with --tags nginx|cratedb|traefik, or --tags teardown to stop."

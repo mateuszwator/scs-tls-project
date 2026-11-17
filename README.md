@@ -29,13 +29,19 @@ docker compose up -d
 ./run.sh                  # see the script header for args
 ```
 
-## Traefik (also via Ansible)
+## Reproduce with Ansible
+
+One playbook brings every lab up and verifies vulnerable vs patched:
 
 ```bash
-cd cve-2025-66491-traefik/ansible
-ansible-galaxy collection install -r requirements.yml && pip install ansible kubernetes
-ansible-playbook site.yml                  # builds the lab, asserts vuln=200 / patched=500
-ansible-playbook site.yml --tags teardown  # clean up
+cd ansible
+ansible-playbook site.yml                  # all three (asserts each result)
+ansible-playbook site.yml --tags nginx     # or cratedb / traefik
+ansible-playbook site.yml --tags teardown  # stop everything
 ```
 
-Run Ansible from Linux/macOS/WSL2. Certs are generated locally and git-ignored.
+Run it from Linux/macOS/WSL2. See [`ansible/README.md`](ansible/README.md).
+Certs are generated locally and git-ignored.
+
+(The Traefik lab also has a Kubernetes-native playbook in
+`cve-2025-66491-traefik/ansible/`.)
