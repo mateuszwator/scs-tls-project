@@ -1,0 +1,131 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta http-equiv="refresh" content="15">
+<title>TLS CVE Reproduction — Results</title>
+<style>
+  :root{
+    --bg:#f6f7f9; --card:#ffffff; --ink:#1b1f24; --muted:#636b74; --line:#e3e6ea;
+    --red:#c0362c; --red-bg:#fbecea; --green:#1f7a3d; --green-bg:#e9f5ec; --accent:#2f3c7e;
+  }
+  *{box-sizing:border-box}
+  body{margin:0;background:var(--bg);color:var(--ink);
+       font:16px/1.5 -apple-system,Segoe UI,Roboto,Helvetica,Arial,sans-serif;}
+  .wrap{max-width:1100px;margin:0 auto;padding:32px 20px 56px;}
+  header h1{margin:0 0 6px;font-size:26px;letter-spacing:-.2px;}
+  header .sub{color:var(--muted);font-size:14px;}
+  .scoreline{display:flex;gap:10px;align-items:center;margin:18px 0 26px;flex-wrap:wrap;}
+  .pill{display:inline-flex;align-items:center;gap:8px;padding:6px 12px;border-radius:999px;
+        font-size:13px;font-weight:600;border:1px solid var(--line);background:#fff;}
+  .pill b{font-weight:700}
+  .card{background:var(--card);border:1px solid var(--line);border-radius:14px;
+        padding:20px 22px;margin:16px 0;box-shadow:0 1px 2px rgba(16,24,40,.04);}
+  .card .top{display:flex;justify-content:space-between;align-items:flex-start;gap:14px;flex-wrap:wrap;}
+  .cve{font-family:ui-monospace,SFMono-Regular,Consolas,monospace;font-size:13px;color:var(--accent);font-weight:700;}
+  .name{font-size:19px;font-weight:700;margin:2px 0 2px;}
+  .mech{color:var(--muted);font-size:14px;max-width:720px;}
+  .badge{font-size:12.5px;font-weight:700;padding:6px 12px;border-radius:8px;white-space:nowrap;}
+  .badge.pass{background:var(--green-bg);color:var(--green);border:1px solid #bfe3c9;}
+  .badge.fail{background:var(--red-bg);color:var(--red);border:1px solid #f0c7c2;}
+  .cols{display:grid;grid-template-columns:1fr 1fr;gap:14px;margin-top:16px;}
+  @media(max-width:620px){.cols{grid-template-columns:1fr}}
+  .panel{border:1px solid var(--line);border-radius:10px;padding:14px 16px;}
+  .panel .h{font-size:12px;font-weight:700;text-transform:uppercase;letter-spacing:.4px;margin-bottom:8px;}
+  .panel.vuln{background:var(--red-bg);border-color:#f0c7c2;}
+  .panel.vuln .h{color:var(--red);}
+  .panel.patched{background:var(--green-bg);border-color:#bfe3c9;}
+  .panel.patched .h{color:var(--green);}
+  .panel .ver{font-family:ui-monospace,Consolas,monospace;font-size:12.5px;color:var(--muted);margin-bottom:6px;}
+  .panel .res{font-size:14.5px;font-weight:600;}
+  .foot{color:var(--muted);font-size:13px;margin-top:28px;border-top:1px solid var(--line);padding-top:14px;}
+  code{font-family:ui-monospace,Consolas,monospace;background:#eef0f3;padding:1px 6px;border-radius:5px;font-size:13px;}
+</style>
+</head>
+<body>
+<div class="wrap">
+  <header>
+    <h1>TLS Vulnerabilities — Reproduction Results</h1>
+    <div class="sub">Each CVE run locally on <code>127.0.0.1</code> as a <b>vulnerable</b> and a <b>patched</b> build, then verified automatically.</div>
+  </header>
+
+  {% set nginx_run   = ngx_vuln is defined %}
+  {% set cratedb_run = crate_vuln is defined %}
+  {% set traefik_run = traefik_out is defined %}
+  {% set nginx_ok   = ('BYPASS SUCCESSFUL' in (ngx_vuln.stdout | default(''))) and ('BYPASS SUCCESSFUL' not in (ngx_patched.stdout | default(''))) %}
+  {% set cratedb_ok = ('reproduced' in (crate_vuln.stdout | default(''))) and ('fix in effect' in (crate_patched.stdout | default(''))) %}
+  {% set traefik_ok = ('HTTP status: 200' in (traefik_out.stdout | default(''))) and ('HTTP status: 500' in (traefik_out.stdout | default(''))) %}
+  {% set total = (nginx_run|int)+(cratedb_run|int)+(traefik_run|int) %}
+  {% set passed = ((nginx_run and nginx_ok)|int)+((cratedb_run and cratedb_ok)|int)+((traefik_run and traefik_ok)|int) %}
+
+  <div class="scoreline">
+    <span class="pill">Run&nbsp;<b>{{ now(fmt='%Y-%m-%d %H:%M:%S') }}</b></span>
+    <span class="pill">Verified&nbsp;<b>{{ passed }}/{{ total }}</b></span>
+    <span class="pill">{{ '✅ all reproduced & fixed' if (total>0 and passed==total) else '⚠️ see cards below' }}</span>
+  </div>
+
+  {% if nginx_run %}
+  <div class="card">
+    <div class="top">
+      <div>
+        <div class="cve">CVE-2025-23419 · nginx · fixed in 1.27.4 / 1.26.3</div>
+        <div class="name">Client-certificate auth bypass via TLS session resumption</div>
+        <div class="mech">Authenticate on a vhost trusting CA-A, save the session, then resume it against a vhost that only trusts CA-B — sending no certificate. Pre-fix nginx restores the cached verify result instead of re-checking it.</div>
+      </div>
+      <div class="badge {{ 'pass' if nginx_ok else 'fail' }}">{{ 'REPRODUCED &amp; FIXED ✓' if nginx_ok else 'CHECK FAILED ✗' }}</div>
+    </div>
+    <div class="cols">
+      <div class="panel vuln"><div class="h">Vulnerable</div><div class="ver">nginx 1.27.3</div>
+        <div class="res">Reached <code>secure.local</code> with a wrong-CA cert — <b>bypass succeeded</b>.</div></div>
+      <div class="panel patched"><div class="h">Patched</div><div class="ver">nginx 1.27.4</div>
+        <div class="res">TLS alert <code>access denied</code> — <b>bypass rejected</b>.</div></div>
+    </div>
+  </div>
+  {% endif %}
+
+  {% if cratedb_run %}
+  <div class="card">
+    <div class="top">
+      <div>
+        <div class="cve">CVE-2024-37309 · CrateDB · fixed in 5.7.2</div>
+        <div class="name">CPU denial-of-service via client-initiated TLS renegotiation</div>
+        <div class="mech">A few cheap connections repeatedly request renegotiation; each forces a costly server-side handshake. The attacker spends almost nothing while the server's CPU saturates.</div>
+      </div>
+      <div class="badge {{ 'pass' if cratedb_ok else 'fail' }}">{{ 'REPRODUCED &amp; FIXED ✓' if cratedb_ok else 'CHECK FAILED ✗' }}</div>
+    </div>
+    <div class="cols">
+      <div class="panel vuln"><div class="h">Vulnerable</div><div class="ver">CrateDB 5.7.1</div>
+        <div class="res">Renegotiation accepted → <b>CPU spikes (DoS)</b>.</div></div>
+      <div class="panel patched"><div class="h">Patched</div><div class="ver">CrateDB 5.7.2</div>
+        <div class="res">Renegotiation refused → <b>CPU stays flat</b>.</div></div>
+    </div>
+  </div>
+  {% endif %}
+
+  {% if traefik_run %}
+  <div class="card">
+    <div class="top">
+      <div>
+        <div class="cve">CVE-2025-66491 · Traefik · fixed in 3.6.3</div>
+        <div class="name">Backend certificate verification disabled (MITM)</div>
+        <div class="mech">The ingress-nginx compatibility provider translated <code>proxy-ssl-verify: "on"</code> into <code>InsecureSkipVerify = true</code>, so Traefik never checked the backend's certificate even though verification was requested.</div>
+      </div>
+      <div class="badge {{ 'pass' if traefik_ok else 'fail' }}">{{ 'REPRODUCED &amp; FIXED ✓' if traefik_ok else 'CHECK FAILED ✗' }}</div>
+    </div>
+    <div class="cols">
+      <div class="panel vuln"><div class="h">Vulnerable</div><div class="ver">Traefik 3.6.2</div>
+        <div class="res"><code>HTTP 200</code> — reached the rogue backend, <b>cert check skipped</b>.</div></div>
+      <div class="panel patched"><div class="h">Patched</div><div class="ver">Traefik 3.6.4</div>
+        <div class="res"><code>HTTP 500</code> — <b>verification enforced</b>, connection refused.</div></div>
+    </div>
+  </div>
+  {% endif %}
+
+  <div class="foot">
+    Generated by the Ansible playbook (<code>ansible/site.yml</code>) after each run · results read from the live attack output ·
+    this page auto-refreshes every 15&nbsp;s.
+  </div>
+</div>
+</body>
+</html>

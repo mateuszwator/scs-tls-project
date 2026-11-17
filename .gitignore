@@ -4,3 +4,6 @@ certs/
 *.p12
 *.key
 *.srl
+
+# Generated results dashboard
+report/

@@ -16,6 +16,13 @@
   connection: local
   gather_facts: false
 
+  # Host the attack scripts dial for 127.0.0.1-published ports. Default is fine
+  # for a normal control node; set -e lab_host=host.docker.internal when running
+  # inside a container (e.g. the Semaphore executor) that reaches the Docker
+  # host through host.docker.internal.
+  environment:
+    LAB_HOST: "{{ lab_host | default('127.0.0.1') }}"
+
   vars:
     repo_root: "{{ playbook_dir }}/.."
     nginx_dir: "{{ playbook_dir }}/../cve-2025-23419-nginx"
@@ -58,8 +65,11 @@
           changed_when: true
 
         - name: nginx | start vulnerable (1.27.3) + patched (1.27.4)
+          # --force-recreate so a re-run picks up freshly generated certs even
+          # if the containers from a previous run are still up (otherwise the
+          # new client cert isn't trusted by the old running nginx).
           ansible.builtin.command:
-            cmd: docker compose up -d
+            cmd: docker compose up -d --force-recreate
             chdir: "{{ nginx_dir }}"
           changed_when: true
 
@@ -123,8 +133,10 @@
           changed_when: true
 
         - name: cratedb | start vulnerable (5.7.1) + patched (5.7.2)
+          # --force-recreate so a re-run uses the freshly generated keystore
+          # instead of whatever the already-running containers loaded earlier.
           ansible.builtin.command:
-            cmd: docker compose up -d
+            cmd: docker compose up -d --force-recreate
             chdir: "{{ cratedb_dir }}"
           changed_when: true
 
@@ -188,7 +200,19 @@
             fail_msg: "traefik check failed - see registered output."
 
     # =========================================================================
+    - name: Render the results dashboard (HTML)
+      tags: [always]
+      block:
+        - name: ensure report dir exists
+          ansible.builtin.file:
+            path: "{{ playbook_dir }}/../report"
+            state: directory
+        - name: write report/index.html from the live attack output
+          ansible.builtin.template:
+            src: report.html.j2
+            dest: "{{ playbook_dir }}/../report/index.html"
+
     - name: Summary
       tags: [always]
       ansible.builtin.debug:
-        msg: "Done. Re-run a single lab with --tags nginx|cratedb|traefik, or --tags teardown to stop."
+        msg: "Done. Dashboard at report/index.html (served on http://localhost:8088). Re-run a single lab with --tags nginx|cratedb|traefik, or --tags teardown to stop."
